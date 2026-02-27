@@ -55,7 +55,7 @@ class Config:
     OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
     OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
     EMBEDDING_MODEL = "text-embedding-3-large"
-    CHAT_MODEL = "gpt-4o"
+    CHAT_MODEL = "gpt-4o-mini"
     EMBEDDING_DIMENSIONS = 1024
 
     # Pinecone
@@ -64,13 +64,13 @@ class Config:
 
     # RAG Settings (token-based)
     # Larger chunks to keep more context together
-    CHUNK_TOKENS_DOCS = 800
-    CHUNK_OVERLAP_TOKENS_DOCS = 150
+    CHUNK_TOKENS_DOCS = 600
+    CHUNK_OVERLAP_TOKENS_DOCS = 100
 
     # Retrieval settings
-    RETRIEVAL_TOP_K = 20  # Retrieve more candidates
-    CONTEXT_MAX_CHUNKS = 8  # Pass more context to LLM
-    MIN_SCORE = 0.25  # Lower threshold to be more inclusive
+    RETRIEVAL_TOP_K = 15  # Retrieve more candidates
+    CONTEXT_MAX_CHUNKS = 6  # Pass more context to LLM
+    MIN_SCORE = 0.3  # Lower threshold to be more inclusive
 
 
 config = Config()
@@ -350,74 +350,77 @@ def extract_structured_chunks(file: UploadFile) -> list[dict[str, Any]]:
 
     # Extract text based on file type
     if filename.endswith(".pptx"):
-        text = _extract_pptx_text(content)
-    elif filename.endswith(".csv"):
-        # For CSV, just treat as plain text for now
-        # TODO: Revisit row-based chunking with batching when we have more time
-        #
-        # # For CSV: Use row-based chunking with batching to balance context and performance
-        # # Convert each row to "Col1: val1 | Col2: val2" format, then batch rows together
-        # text_content = content.decode("utf-8-sig", errors="replace")
-        # reader = csv.DictReader(io.StringIO(text_content))
-        #
-        # row_texts: list[str] = []
-        # for row in reader:
-        #     # Format: "ColA: valA | ColB: valB"
-        #     row_text = " | ".join(f"{k}: {v}" for k, v in row.items() if v and v.strip())
-        #     if row_text.strip():
-        #         row_texts.append(row_text)
-        #
-        # if not row_texts:
-        #     return []
-        #
-        # # Batch rows into chunks (target ~400-500 tokens per chunk for good retrieval)
-        # # Average row is ~50-100 tokens, so batch 5-10 rows per chunk
-        # chunks: list[str] = []
-        # current_chunk: list[str] = []
-        # current_tokens = 0
-        # target_tokens = 450  # Sweet spot for retrieval
-        #
-        # for row_text in row_texts:
-        #     row_tokens = num_tokens(row_text)
-        #
-        #     if current_tokens + row_tokens > target_tokens and current_chunk:
-        #         # Chunk is full, save it and start new one
-        #         chunks.append("\n".join(current_chunk))
-        #         current_chunk = [row_text]
-        #         current_tokens = row_tokens
-        #     else:
-        #         # Add to current chunk
-        #         current_chunk.append(row_text)
-        #         current_tokens += row_tokens
-        #
-        # # Don't forget the last chunk
-        # if current_chunk:
-        #     chunks.append("\n".join(current_chunk))
-        #
-        # return [{"text": chunk, "chunk_index": i} for i, chunk in enumerate(chunks)]
+            # PPTX: chunk per slide to preserve slide number for citation
+            prs = Presentation(io.BytesIO(content))
+            result_chunks = []
+            chunk_index = 0
+            for slide_num, slide in enumerate(prs.slides, start=1):
+                parts = []
+                for shape in slide.shapes:
+                    shape_any = cast(Any, shape)
+                    if hasattr(shape_any, "text_frame") and shape_any.text_frame:
+                        txt = (shape_any.text_frame.text or "").strip()
+                        if txt:
+                            parts.append(txt)
+                slide_text = "\n".join(parts).strip()
+                if slide_text:
+                    sub_chunks = chunk_by_tokens(
+                        slide_text,
+                        chunk_tokens=config.CHUNK_TOKENS_DOCS,
+                        overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
+                    )
+                    for sub in sub_chunks:
+                        result_chunks.append({
+                            "text": sub,
+                            "chunk_index": chunk_index,
+                            "page_number": slide_num,
+                            "location_type": "slide",
+                        })
+                        chunk_index += 1
+            return result_chunks
 
-        text = content.decode("utf-8-sig", errors="replace")
-    elif filename.endswith(".pdf"):
-        text = _extract_pdf_text_best_fidelity(content)
-    elif filename.endswith(".docx"):
-        text = _extract_docx_text(content)
-    elif filename.endswith((".txt", ".md")):
-        text = content.decode("utf-8-sig", errors="replace")
-    else:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {filename}")
+        elif filename.endswith(".pdf"):
+            # PDF: chunk per page to preserve page number for citation
+            pages = _extract_pdf_with_pages(content)
+            result_chunks = []
+            chunk_index = 0
+            for page in pages:
+                sub_chunks = chunk_by_tokens(
+                    page["text"],
+                    chunk_tokens=config.CHUNK_TOKENS_DOCS,
+                    overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
+                )
+                for sub in sub_chunks:
+                    result_chunks.append({
+                        "text": sub,
+                        "chunk_index": chunk_index,
+                        "page_number": page["page_number"],
+                        "location_type": "page",
+                    })
+                    chunk_index += 1
+            return result_chunks
 
-    if not text.strip():
-        return []
+        elif filename.endswith(".csv"):
+            text = content.decode("utf-8-sig", errors="replace")
+        elif filename.endswith(".pdf"):
+            text = _extract_pdf_text_best_fidelity(content)
+        elif filename.endswith(".docx"):
+            text = _extract_docx_text(content)
+        elif filename.endswith((".txt", ".md")):
+            text = content.decode("utf-8-sig", errors="replace")
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {filename}")
 
-    # Chunk everything with token-based chunking
-    text_chunks = chunk_by_tokens(
-        text,
-        chunk_tokens=config.CHUNK_TOKENS_DOCS,
-        overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
-    )
+        if not text.strip():
+            return []
 
-    return [{"text": chunk, "chunk_index": i} for i, chunk in enumerate(text_chunks)]
-
+        # For non-PDF/PPTX: regular chunking without page metadata
+        text_chunks = chunk_by_tokens(
+            text,
+            chunk_tokens=config.CHUNK_TOKENS_DOCS,
+            overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
+        )
+        return [{"text": chunk, "chunk_index": i} for i, chunk in enumerate(text_chunks)]
 
 def generate_document_id() -> str:
     """Generate a unique document ID."""
@@ -518,6 +521,8 @@ def query_similar(
             "text": (m.metadata or {}).get("text", ""),
             "filename": (m.metadata or {}).get("filename", ""),
             "document_id": (m.metadata or {}).get("document_id", ""),
+            "page_number": (m.metadata or {}).get("page_number"),
+            "location_type": (m.metadata or {}).get("location_type"),
             "metadata": m.metadata,
         }
         for m in results.matches
@@ -576,7 +581,16 @@ def generate_answer(
     """Generate an answer using OpenAI's chat completion API."""
     client = get_openai()
 
-    prompt = system_prompt or "You are a helpful AI assistant."
+    prompt = system_prompt or """You are a rigorous MBA study assistant at Columbia Business School, designed to help students master course material and prepare for exams.
+
+When answering questions:
+1. Be precise and academic in tone — use correct business terminology
+2. Structure responses with clear headers and bullet points for easy review
+3. Cite sources with exact location: [filename, p.X] or [filename, Slide X] inline after every key claim
+4. If multiple sources support a point, cite all of them
+5. After your answer, add a "Key Takeaway" section with 1-2 sentences summarizing the core insight
+6. If documents lack sufficient information, state this clearly, then provide general MBA knowledge as supplement
+7. Prioritize depth over brevity — exam preparation requires complete understanding"""
     model = chat_model or config.CHAT_MODEL
 
     # Build messages list with proper typing
@@ -694,8 +708,18 @@ async def chat(request: ChatRequest) -> ChatResponse:
 
         # Build context
         if context_chunks:
+            def format_source_label(c: dict) -> str:
+                filename = c['filename']
+                page = c.get('page_number')
+                loc_type = c.get('location_type')
+                if page and loc_type == 'slide':
+                    return f"{filename}, Slide {page}"
+                elif page and loc_type == 'page':
+                    return f"{filename}, p.{page}"
+                return filename
+
             context = "\n\n---\n\n".join(
-                [f"[Source: {c['filename']}]\n{c['text']}" for c in context_chunks]
+                [f"[Source: {format_source_label(c)}]\n{c['text']}" for c in context_chunks]
             )
         else:
             context = ""
@@ -790,6 +814,8 @@ async def upload(
                     "total_chunks": len(structured_chunks),
                     "uploaded_at": uploaded_at,
                     "is_first_chunk": i == 0,
+                    "page_number": structured_chunk.get("page_number"),
+                    "location_type": structured_chunk.get("location_type"),
                 },
             })
 
@@ -909,6 +935,8 @@ async def upload_from_url(request: dict[str, Any]) -> dict[str, Any]:
                     "total_chunks": len(structured_chunks),
                     "uploaded_at": uploaded_at,
                     "is_first_chunk": i == 0,
+                    "page_number": structured_chunk.get("page_number"),
+                    "location_type": structured_chunk.get("location_type"),
                 },
             })
 
