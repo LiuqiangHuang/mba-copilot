@@ -436,8 +436,8 @@ export default function Home() {
   const suggestedQuestions = [
     'What are the key concepts in my uploaded materials?',
     'Summarize the main points from my documents',
-    'Help me understand the frameworks discussed',
-    'What are the practical applications mentioned?',
+    'What case studies are covered and what are their takeaways?',
+    'How do these concepts apply to real business decisions?',
   ];
 
   const searchScope = selectedDocIds.length === 0 || selectedDocIds.length === documents.length
@@ -687,11 +687,12 @@ export default function Home() {
               <div className="max-w-2xl mx-auto text-center py-8 sm:py-12">
                 <Sparkles className="w-12 h-12 mx-auto mb-4 text-columbia-500" />
                 <h2 className="text-2xl font-semibold text-slate-800 mb-2">
-                  Welcome to MBA Copilot
+                  Your Personal CBS Study Assistant
                 </h2>
                 <p className="text-slate-600 mb-8">
-                  Upload your course materials and ask questions. I&apos;ll help you understand
-                  concepts, summarize readings, and prepare for discussions.
+  Upload your course materials and ask questions. I&apos;ll help you master
+  frameworks, analyze case studies, and prepare for class discussions —
+  all grounded in your actual readings.
                 </p>
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   {suggestedQuestions.map((q, i) => (
