@@ -333,9 +333,7 @@ def _extract_pdf_with_pages(content: bytes) -> list[dict[str, Any]]:
 
 def extract_structured_chunks(file: UploadFile) -> list[dict[str, Any]]:
     """Extract file into structured chunks with metadata.
-
-    Simple token-based chunking for all file types.
-    Returns list of dicts with 'text' and 'chunk_index'.
+    Returns list of dicts with 'text', 'chunk_index', and optional page metadata.
     """
     content = file.file.read()
     try:
@@ -348,45 +346,23 @@ def extract_structured_chunks(file: UploadFile) -> list[dict[str, Any]]:
 
     filename = file.filename.lower()
 
-    # Extract text based on file type
     if filename.endswith(".pptx"):
-            # PPTX: chunk per slide to preserve slide number for citation
-            prs = Presentation(io.BytesIO(content))
-            result_chunks = []
-            chunk_index = 0
-            for slide_num, slide in enumerate(prs.slides, start=1):
-                parts = []
-                for shape in slide.shapes:
-                    shape_any = cast(Any, shape)
-                    if hasattr(shape_any, "text_frame") and shape_any.text_frame:
-                        txt = (shape_any.text_frame.text or "").strip()
-                        if txt:
-                            parts.append(txt)
-                slide_text = "\n".join(parts).strip()
-                if slide_text:
-                    sub_chunks = chunk_by_tokens(
-                        slide_text,
-                        chunk_tokens=config.CHUNK_TOKENS_DOCS,
-                        overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
-                    )
-                    for sub in sub_chunks:
-                        result_chunks.append({
-                            "text": sub,
-                            "chunk_index": chunk_index,
-                            "page_number": slide_num,
-                            "location_type": "slide",
-                        })
-                        chunk_index += 1
-            return result_chunks
-
-        elif filename.endswith(".pdf"):
-            # PDF: chunk per page to preserve page number for citation
-            pages = _extract_pdf_with_pages(content)
-            result_chunks = []
-            chunk_index = 0
-            for page in pages:
+        # PPTX: chunk per slide to preserve slide number for citation
+        prs = Presentation(io.BytesIO(content))
+        result_chunks = []
+        chunk_index = 0
+        for slide_num, slide in enumerate(prs.slides, start=1):
+            parts = []
+            for shape in slide.shapes:
+                shape_any = cast(Any, shape)
+                if hasattr(shape_any, "text_frame") and shape_any.text_frame:
+                    txt = (shape_any.text_frame.text or "").strip()
+                    if txt:
+                        parts.append(txt)
+            slide_text = "\n".join(parts).strip()
+            if slide_text:
                 sub_chunks = chunk_by_tokens(
-                    page["text"],
+                    slide_text,
                     chunk_tokens=config.CHUNK_TOKENS_DOCS,
                     overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
                 )
@@ -394,33 +370,51 @@ def extract_structured_chunks(file: UploadFile) -> list[dict[str, Any]]:
                     result_chunks.append({
                         "text": sub,
                         "chunk_index": chunk_index,
-                        "page_number": page["page_number"],
-                        "location_type": "page",
+                        "page_number": slide_num,
+                        "location_type": "slide",
                     })
                     chunk_index += 1
-            return result_chunks
+        return result_chunks
 
-        elif filename.endswith(".csv"):
-            text = content.decode("utf-8-sig", errors="replace")
-        elif filename.endswith(".pdf"):
-            text = _extract_pdf_text_best_fidelity(content)
-        elif filename.endswith(".docx"):
-            text = _extract_docx_text(content)
-        elif filename.endswith((".txt", ".md")):
-            text = content.decode("utf-8-sig", errors="replace")
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {filename}")
+    elif filename.endswith(".pdf"):
+        # PDF: chunk per page to preserve page number for citation
+        pages = _extract_pdf_with_pages(content)
+        result_chunks = []
+        chunk_index = 0
+        for page in pages:
+            sub_chunks = chunk_by_tokens(
+                page["text"],
+                chunk_tokens=config.CHUNK_TOKENS_DOCS,
+                overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
+            )
+            for sub in sub_chunks:
+                result_chunks.append({
+                    "text": sub,
+                    "chunk_index": chunk_index,
+                    "page_number": page["page_number"],
+                    "location_type": "page",
+                })
+                chunk_index += 1
+        return result_chunks
 
-        if not text.strip():
-            return []
+    elif filename.endswith(".csv"):
+        text = content.decode("utf-8-sig", errors="replace")
+    elif filename.endswith(".docx"):
+        text = _extract_docx_text(content)
+    elif filename.endswith((".txt", ".md")):
+        text = content.decode("utf-8-sig", errors="replace")
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {filename}")
 
-        # For non-PDF/PPTX: regular chunking without page metadata
-        text_chunks = chunk_by_tokens(
-            text,
-            chunk_tokens=config.CHUNK_TOKENS_DOCS,
-            overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
-        )
-        return [{"text": chunk, "chunk_index": i} for i, chunk in enumerate(text_chunks)]
+    if not text.strip():
+        return []
+
+    text_chunks = chunk_by_tokens(
+        text,
+        chunk_tokens=config.CHUNK_TOKENS_DOCS,
+        overlap_tokens=config.CHUNK_OVERLAP_TOKENS_DOCS,
+    )
+    return [{"text": chunk, "chunk_index": i} for i, chunk in enumerate(text_chunks)]
 
 def generate_document_id() -> str:
     """Generate a unique document ID."""
